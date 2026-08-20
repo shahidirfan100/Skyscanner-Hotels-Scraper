@@ -1,0 +1,12 @@
+.DS_Store
+.idea
+.vscode
+.zed
+dist
+node_modules
+apify_storage
+storage
+.test-storage
+.probe-storage
+package-lock.json
+/.playwright-mcp

@@ -1,0 +1,9 @@
+node_modules
+.git
+.gitignore
+*.log
+apify_storage
+crawlee_storage
+storage
+.test-storage
+.probe-storage

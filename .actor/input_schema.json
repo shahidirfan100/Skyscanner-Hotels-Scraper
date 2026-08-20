@@ -1,0 +1,120 @@
+{
+    "title": "Skyscanner Hotels Scraper",
+    "description": "Collect hotel listing data from a Skyscanner search URL or destination.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "url": {
+            "title": "Skyscanner search URL",
+            "type": "string",
+            "description": "A public Skyscanner hotel search URL. If both url and location are provided, url takes priority.",
+            "editor": "textfield",
+            "prefill": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-08-27&checkout=2026-08-28&adults=2&rooms=1"
+        },
+        "location": {
+            "title": "Location",
+            "type": "string",
+            "description": "A city or destination name, a numeric Skyscanner entity ID, or a Skyscanner destination URL. Used when url is empty.",
+            "editor": "textfield",
+            "prefill": "New York"
+        },
+        "checkin": {
+            "title": "Check-in",
+            "type": "string",
+            "description": "Check-in date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
+            "editor": "textfield",
+            "prefill": "2026-08-27"
+        },
+        "checkout": {
+            "title": "Check-out",
+            "type": "string",
+            "description": "Check-out date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
+            "editor": "textfield",
+            "prefill": "2026-08-28"
+        },
+        "adults": {
+            "title": "Adults",
+            "type": "integer",
+            "description": "Number of adult travellers.",
+            "editor": "number",
+            "minimum": 1,
+            "maximum": 16,
+            "prefill": 2
+        },
+        "rooms": {
+            "title": "Rooms",
+            "type": "integer",
+            "description": "Number of rooms required.",
+            "editor": "number",
+            "minimum": 1,
+            "maximum": 8,
+            "prefill": 1
+        },
+        "market": {
+            "title": "Market",
+            "type": "string",
+            "description": "Two-letter market code used for pricing and availability, for example US or UK.",
+            "editor": "textfield",
+            "prefill": "US"
+        },
+        "locale": {
+            "title": "Locale",
+            "type": "string",
+            "description": "Locale used for labels and translated listing content.",
+            "editor": "textfield",
+            "prefill": "en-US"
+        },
+        "currency": {
+            "title": "Currency",
+            "type": "string",
+            "description": "Three-letter currency code used for prices.",
+            "editor": "textfield",
+            "prefill": "USD"
+        },
+        "sortBy": {
+            "title": "Sort listings",
+            "type": "string",
+            "description": "Order in which hotels are returned.",
+            "editor": "select",
+            "enum": ["best", "price_low", "price_high", "rating", "stars_high", "stars_low", "distance"],
+            "enumTitles": [
+                "Best",
+                "Price: low to high",
+                "Price: high to low",
+                "Guest rating",
+                "Stars: high to low",
+                "Stars: low to high",
+                "Distance"
+            ],
+            "prefill": "best"
+        },
+        "results_wanted": {
+            "title": "Maximum hotels",
+            "type": "integer",
+            "description": "Maximum number of unique hotel listings saved across the run.",
+            "editor": "number",
+            "minimum": 1,
+            "prefill": 20
+        },
+        "max_pages": {
+            "title": "Maximum pages",
+            "type": "integer",
+            "description": "Maximum listing pages requested. Each page contains up to 35 hotels.",
+            "editor": "number",
+            "minimum": 1,
+            "prefill": 5
+        },
+        "proxyConfiguration": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Use Apify Proxy or your own proxy URLs for reliable production runs.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": ["RESIDENTIAL"]
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}

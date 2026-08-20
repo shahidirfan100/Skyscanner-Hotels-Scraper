@@ -1,0 +1,19 @@
+{
+    "url": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-08-27&checkout=2026-08-28&adults=2&rooms=1",
+    "location": "New York",
+    "checkin": "2026-08-27",
+    "checkout": "2026-08-28",
+    "adults": 2,
+    "childrenAges": [],
+    "rooms": 1,
+    "market": "US",
+    "locale": "en-US",
+    "currency": "USD",
+    "sortBy": "best",
+    "results_wanted": 20,
+    "max_pages": 5,
+    "proxyConfiguration": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+    }
+}

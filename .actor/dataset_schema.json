@@ -1,0 +1,39 @@
+{
+    "actorSpecification": 1,
+    "views": {
+        "overview": {
+            "title": "Hotel listings",
+            "transformation": {
+                "fields": [
+                    "hotelId",
+                    "hotelName",
+                    "starRating",
+                    "reviewScore",
+                    "reviewCount",
+                    "pricePerNight",
+                    "pricePerNightWithTaxes",
+                    "detailsPageUrl",
+                    "location",
+                    "sourcePage",
+                    "scrapedAt"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "hotelId": { "label": "Hotel ID", "format": "text" },
+                    "hotelName": { "label": "Hotel name", "format": "text" },
+                    "starRating": { "label": "Stars", "format": "number" },
+                    "reviewScore": { "label": "Guest rating", "format": "number" },
+                    "reviewCount": { "label": "Reviews", "format": "number" },
+                    "pricePerNight": { "label": "Price per night", "format": "text" },
+                    "pricePerNightWithTaxes": { "label": "Nightly price with taxes", "format": "text" },
+                    "detailsPageUrl": { "label": "Hotel page", "format": "link" },
+                    "location": { "label": "Location", "format": "text" },
+                    "sourcePage": { "label": "Page", "format": "number" },
+                    "scrapedAt": { "label": "Scraped at", "format": "date" }
+                }
+            }
+        }
+    }
+}

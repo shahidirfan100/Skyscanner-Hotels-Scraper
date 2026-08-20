@@ -1,0 +1,26 @@
+{
+    "name": "skyscanner-hotels-scraper",
+    "version": "1.0.0",
+    "description": "Collect structured hotel listings from public Skyscanner search pages.",
+    "type": "module",
+    "dependencies": {
+        "apify": "^3.7.2",
+        "impit": "^0.14.3",
+        "tough-cookie": "^6.0.2"
+    },
+    "devDependencies": {
+        "@apify/eslint-config": "^2.0.0",
+        "eslint": "^9.29.0",
+        "eslint-config-prettier": "^10.1.5",
+        "prettier": "^3.5.3"
+    },
+    "scripts": {
+        "start": "node src/main.js",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "lint": "eslint",
+        "lint:fix": "eslint --fix"
+    },
+    "author": "Shahid Irfan",
+    "license": "ISC"
+}
