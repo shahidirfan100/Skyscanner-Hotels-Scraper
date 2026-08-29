@@ -54,8 +54,8 @@ No browser cookies, authorization token, or hard-coded session value is stored i
 
 Live replay tests (2026-08) reproduced the cloud failure and confirmed the working browser flow:
 
-- The hotel BFF POST works with the browser-faithful header set below, with or without cookies, and does **not** need a page warm-up. A page warm-up must be avoided: loading `/hotels` or `/hotels/search` triggers the PerimeterX page challenge, sets the `_pxhd` cookie, and a later BFF POST carrying that cookie returns `403 {"reason":"blocked",...}`.
-- The autosuggest request was failing on Apify cloud with the previous headers (`platform: desktop`, `pagetype: hotels-home`, `accept: application/json`). Removing those two custom headers and sending the browser-faithful header set turns the same request from `403 blocked` into `200` JSON consistently.
+- The hotel BFF POST works with Impit's native browser headers plus the endpoint-specific headers below, with or without cookies, and does **not** need a page warm-up. A page warm-up must be avoided: loading `/hotels` or `/hotels/search` triggers the PerimeterX page challenge, sets the `_pxhd` cookie, and a later BFF POST carrying that cookie returns `403 {"reason":"blocked",...}`.
+- The autosuggest request was failing on Apify cloud with the previous headers (`platform: desktop`, `pagetype: hotels-home`, `accept: application/json`). Removing those custom headers and sending the browser-faithful header set is required, but the result is still profile/IP dependent: a direct Chrome request can remain `403 blocked`, while the verified `ios18` Impit fallback returns `200` JSON without a page warm-up.
 - The autosuggest endpoint returns a **top-level JSON array** of place objects (`entity_id`, `entity_name`, `type`), not an object with a `places` key. The resolver now accepts the array shape (and keeps the older object shapes for compatibility) and ranks city/district results ahead of airports.
 - The BFF payload market code must be a valid Skyscanner market: `GB` is rejected with `400 Market (GB) is invalid`; the correct code for the UK market is `UK`. `inferMarket` maps `skyscanner.co.uk` to `UK`, and locale/currency defaults are derived from the inferred market.
 
@@ -64,31 +64,38 @@ Live replay tests (2026-08) reproduced the cloud failure and confirmed the worki
 Hotel BFF POST:
 
 - `content-type: text/plain;charset=UTF-8`
-- `accept: application/json, text/plain, */*`
-- `accept-language`: derived from the resolved locale (e.g. `en-US,en;q=0.9`)
 - `x-user-agent: D;Web`
 - `Skyscanner-Correlation-ID`: a fresh UUID for each request
 - `traffic_source: Unknown`
 - `app_name: web`
 - `origin: https://www.skyscanner.com`
 - `referer`: the supplied or generated public search URL
-- `sec-fetch-site: same-origin`
-- `sec-fetch-mode: cors`
-- `sec-fetch-dest: empty`
+- Impit supplies the matching `user-agent`, `accept`, `accept-language`, and `sec-fetch-*` headers and the corresponding TLS fingerprint.
 
 Autosuggest GET (location-name resolution only):
 
-- `accept: application/json, text/plain, */*`
-- `accept-language`: derived from the resolved locale
 - `referer: https://www.skyscanner.com/hotels`
 - `x-user-agent: D;Web`
 - `app_name: web`
-- `sec-fetch-site: same-origin`
-- `sec-fetch-mode: cors`
-- `sec-fetch-dest: empty`
 - `Skyscanner-Correlation-ID`: a fresh UUID
+- Impit supplies the matching browser headers and TLS fingerprint.
 
 A session cookie jar is attached to the Impit client so the `__Secure-session_id` cookie issued by the BFF is replayed across polls and pages, matching browser session behavior. No page/browser cookies are ever fetched.
+
+### Impit browser verification
+
+The same future-date BFF request was tested without manually overriding Impit's browser-generated headers:
+
+| Impit profile | Result                                         |
+| ------------- | ---------------------------------------------- |
+| `chrome`      | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+| `chrome136`   | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+| `firefox`     | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+| `firefox144`  | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+| `ios18`       | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+| `okhttp5`     | HTTP 200, `SEARCH_STATUS_COMPLETED`, 35 hotels |
+
+The same non-Chrome profiles timed out when desktop `sec-fetch-*` headers were forced manually. Those overrides are therefore removed. Runtime starts with the documented desktop web flow using `browser: 'chrome'`, `x-user-agent: D;Web`, `app_name: web`, and the Skyscanner web origin/referrer. If free-text autosuggest receives a block, the actor makes a bounded retry with the directly verified `ios18` Impit profile; this is a mobile-browser fallback for the same web endpoint, not an app endpoint. The hotel BFF also returned 200 with `ios18`, so a successful fallback can continue the same search session without mixing manually forced desktop browser headers.
 
 ### Proxy session rotation for PerimeterX IP blocks
 
@@ -102,13 +109,13 @@ Retries are still bounded (`MAX_RETRIES`, currently 3) per request, so the worst
 
 ## Candidate matrix
 
-| Candidate                                      | Direct result                                                                  | Decision                                                                       |
-| ---------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| Public hotel search page                       | HTTP 200 JavaScript shell with no listing records                              | Rejected as a data source                                                      |
-| Browser network request to the listing service | HTTP 200 JSON with hotel records, totals, prices, images, ratings, and filters | Selected                                                                       |
-| Direct Impit replay of the listing request     | HTTP 200 JSON, with both immediate and token-poll completion observed          | Selected for runtime                                                           |
-| Internal location autosuggest request          | Useful when accessible, but returned a bot challenge in the local environment  | Optional free-text resolver; numeric IDs and destination URLs remain supported |
-| Official partner API                           | Requires credentials outside this actor                                        | Rejected                                                                       |
+| Candidate                                      | Direct result                                                                                               | Decision                                                                                                         |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Public hotel search page                       | HTTP 200 JavaScript shell with no listing records                                                           | Rejected as a data source                                                                                        |
+| Browser network request to the listing service | HTTP 200 JSON with hotel records, totals, prices, images, ratings, and filters                              | Selected                                                                                                         |
+| Direct Impit replay of the listing request     | HTTP 200 JSON, with both immediate and token-poll completion observed                                       | Selected for runtime                                                                                             |
+| Internal location autosuggest request          | Chrome: HTTP 403 in the reproduced environment; ios18: HTTP 200 JSON array with London city entity 27544008 | Selected for free-text resolution with bounded ios18 fallback; numeric IDs and destination URLs remain supported |
+| Official partner API                           | Requires credentials outside this actor                                                                     | Rejected                                                                                                         |
 
 ## Verification evidence
 
@@ -121,8 +128,8 @@ Retries are still bounded (`MAX_RETRIES`, currently 3) per request, so the worst
 
 ## Runtime request strategy
 
-- Create an Impit client with the Chrome profile, a session-suffixed proxy URL, and a session cookie jar; keep it for the initial search, polling, location resolution, and pagination.
-- Retry timeouts, connection resets, HTTP 403/429, server errors, and non-JSON 200 responses with bounded backoff, rotating to a fresh proxy session on 403/429 and connection errors.
+- Create an Impit client with the Chrome profile, a session-suffixed proxy URL, and a session cookie jar; keep it for the initial search, polling, and pagination. Free-text location resolution starts on Chrome and uses the directly verified `ios18` mobile-browser profile only when the autosuggest request is blocked or otherwise temporarily unavailable.
+- Retry timeouts, connection resets, HTTP 403/429, server errors, and non-JSON 200 responses with bounded backoff, rotating to a fresh proxy session on 403/429 and connection errors. Location fallback is limited to the normal request retry budget and does not loop indefinitely.
 - If the initial search stays `SEARCH_STATUS_TRIGGERED` past the poll limit or returns `SEARCH_STATUS_FAILED`, restart the search from scratch with a fresh session, up to a bounded number of attempts, instead of silently returning an empty result.
 - Push each completed page batch immediately and deduplicate by hotel ID.
 - Recursively omit nulls, empty strings, empty arrays, and empty objects before saving records.

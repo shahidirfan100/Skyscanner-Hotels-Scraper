@@ -13,6 +13,7 @@ const MAX_RETRIES = 3;
 const MAX_INITIAL_SEARCH_ATTEMPTS = 3;
 const MAX_PROXY_ROTATIONS = 6;
 const MAX_SEARCH_POLLS = 8;
+const LOCATION_FALLBACK_BROWSER = 'ios18';
 const REQUEST_TIMEOUT_MS = 30_000;
 const MS_PER_DAY = 24 * 60 * 60 * 1_000;
 const SKYSCANNER_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*skyscanner\.[a-z.]{2,}$/i;
@@ -63,18 +64,8 @@ export function cleanRecord(record) {
     return cleanValue(record) || {};
 }
 
-function acceptLanguageHeader(locale) {
-    const primary = String(locale).split('-')[0];
-    return `${locale},${primary};q=0.9`;
-}
-
 function browserFetchHeaders(extra) {
     return {
-        accept: 'application/json, text/plain, */*',
-        'accept-language': acceptLanguageHeader(extra.locale || 'en-US'),
-        'sec-fetch-site': 'same-origin',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-dest': 'empty',
         'Skyscanner-Correlation-ID': randomUUID(),
         ...extra.headers,
     };
@@ -223,12 +214,12 @@ async function createProxyConfiguration(proxyConfiguration) {
     return Actor.createProxyConfiguration({ ...proxyConfiguration });
 }
 
-async function createClient(proxy, sessionIndex) {
+async function createClient(proxy, sessionIndex, browser = 'chrome') {
     const sessionSuffix = `${sessionIndex}${randomUUID().replaceAll('-', '').slice(0, 10)}`;
     const proxyUrl = proxy ? await proxy.newUrl(`skyscanner${sessionSuffix}`) : undefined;
 
     return new Impit({
-        browser: 'chrome',
+        browser,
         ignoreTlsErrors: true,
         timeout: REQUEST_TIMEOUT_MS,
         cookieJar: new CookieJar(),
@@ -243,19 +234,21 @@ class ClientManager {
         this.rotations = 0;
         this.maxRotations = MAX_PROXY_ROTATIONS;
         this.client = null;
+        this.browser = 'chrome';
     }
 
     async init() {
         this.proxy = await createProxyConfiguration(this.proxyConfiguration);
-        this.client = await createClient(this.proxy, 0);
+        this.client = await createClient(this.proxy, 0, this.browser);
     }
 
-    async rotate(reason) {
+    async rotate(reason, browser = this.browser) {
         if (this.rotations >= this.maxRotations) return false;
         this.rotations++;
+        this.browser = browser;
         const context = this.proxy ? `proxy session ${this.rotations}/${this.maxRotations}` : 'fresh client';
-        log.warning(`Rotating to ${context} after ${reason}.`);
-        this.client = await createClient(this.proxy, this.rotations);
+        log.debug(`Rotating to ${context} after ${reason}.`);
+        this.client = await createClient(this.proxy, this.rotations, this.browser);
         return true;
     }
 }
@@ -278,7 +271,7 @@ function isRetryableError(error) {
     return error?.retryable === true;
 }
 
-async function fetchJsonWithRetry(clientManager, url, request, label) {
+async function fetchJsonWithRetry(clientManager, url, request, label, options = {}) {
     let lastError;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -295,9 +288,10 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
         } catch (error) {
             lastError = createRetryableError(`${label} request failed: ${error.message}`);
             if (attempt === MAX_RETRIES) break;
-            const rotated = await clientManager.rotate(`request error: ${error.message}`);
+            const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
+            const rotated = await clientManager.rotate(`request error: ${error.message}`, fallbackBrowser);
             if (!rotated) break;
-            log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} failed: ${error.message}`);
+            log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} failed: ${error.message}`);
             await wait(attempt * 1_000 + Math.floor(Math.random() * 400));
             continue;
         }
@@ -308,9 +302,10 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
             } catch (error) {
                 lastError = createRetryableError(`${label} returned invalid JSON: ${error.message}`);
                 if (attempt === MAX_RETRIES) break;
-                const rotated = await clientManager.rotate(`${label} returned non-JSON content`);
+                const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
+                const rotated = await clientManager.rotate(`${label} returned non-JSON content`, fallbackBrowser);
                 if (!rotated) break;
-                log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned non-JSON content.`);
+                log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned non-JSON content.`);
                 await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
                 continue;
             }
@@ -323,9 +318,10 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
         lastError = createHttpError(label, response.status, responseText);
         if (attempt === MAX_RETRIES) break;
 
-        const rotated = await clientManager.rotate(`HTTP ${response.status}`);
+        const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
+        const rotated = await clientManager.rotate(`HTTP ${response.status}`, fallbackBrowser);
         if (!rotated) break;
-        log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned HTTP ${response.status}.`);
+        log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned HTTP ${response.status}.`);
         await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
     }
 
@@ -336,7 +332,6 @@ function apiHeaders(context) {
     return {
         'content-type': 'text/plain;charset=UTF-8',
         ...browserFetchHeaders({
-            locale: context.locale,
             headers: {
                 'x-user-agent': 'D;Web',
                 traffic_source: 'Unknown',
@@ -402,7 +397,6 @@ async function resolveLocation(clientManager, location, market, locale) {
         autosuggestUrl,
         {
             headers: browserFetchHeaders({
-                locale,
                 headers: {
                     referer: AUTOSUGGEST_REFERER,
                     'x-user-agent': 'D;Web',
@@ -411,6 +405,7 @@ async function resolveLocation(clientManager, location, market, locale) {
             }),
         },
         `Location lookup for "${value}"`,
+        { browserFallbacks: [LOCATION_FALLBACK_BROWSER, LOCATION_FALLBACK_BROWSER] },
     );
 
     const place = findAutosuggestEntity(data);
@@ -548,7 +543,7 @@ async function fetchSearchPageWithStatusRecovery(clientManager, context, payload
 
         const rotated = await clientManager.rotate(`${label} returned SEARCH_STATUS_FAILED`);
         if (!rotated) throw error;
-        log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${error.message}`);
+        log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${error.message}`);
         await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
     }
     throw createRetryableError(`${label} failed after ${MAX_RETRIES} attempts.`);
@@ -600,7 +595,7 @@ async function fetchInitialSearch(clientManager, context, payload) {
 
             const rotated = await clientManager.rotate(`initial search recovery: ${error.message}`);
             if (!rotated) throw error;
-            log.warning(
+            log.debug(
                 `Initial search attempt ${attempt}/${MAX_INITIAL_SEARCH_ATTEMPTS} failed: ${error.message}. Retrying with a fresh session.`,
             );
             await wait(1_000 + attempt * 750);
