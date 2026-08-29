@@ -14,6 +14,7 @@ const MAX_INITIAL_SEARCH_ATTEMPTS = 3;
 const MAX_PROXY_ROTATIONS = 6;
 const MAX_SEARCH_POLLS = 8;
 const REQUEST_TIMEOUT_MS = 30_000;
+const MS_PER_DAY = 24 * 60 * 60 * 1_000;
 const SKYSCANNER_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*skyscanner\.[a-z.]{2,}$/i;
 const SKYSCANNER_ORIGIN = 'https://www.skyscanner.com';
 const AUTOSUGGEST_REFERER = 'https://www.skyscanner.com/hotels';
@@ -124,6 +125,44 @@ export function normalizeDate(value, name) {
     return value;
 }
 
+function formatUtcDate(date) {
+    return date.toISOString().slice(0, 10);
+}
+
+function synchronizeSearchUrl(searchUrl, { checkin, checkout, adults, rooms }) {
+    const url = new URL(searchUrl);
+    url.searchParams.set('checkin', checkin);
+    url.searchParams.set('checkout', checkout);
+    url.searchParams.set('adults', String(adults));
+    url.searchParams.set('rooms', String(rooms));
+    return url.toString();
+}
+
+export function normalizeStayDates(checkinValue, checkoutValue, now = new Date()) {
+    const checkin = normalizeDate(checkinValue, 'checkin');
+    const checkout = normalizeDate(checkoutValue, 'checkout');
+    if (checkout <= checkin) throw new Error('checkout must be after checkin.');
+
+    const checkinDate = new Date(`${checkin}T00:00:00Z`);
+    const checkoutDate = new Date(`${checkout}T00:00:00Z`);
+    const stayLength = Math.round((checkoutDate - checkinDate) / MS_PER_DAY);
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const firstBookableDate = new Date(today);
+    firstBookableDate.setUTCDate(firstBookableDate.getUTCDate() + 1);
+
+    if (checkinDate < firstBookableDate) {
+        const adjustedCheckout = new Date(firstBookableDate);
+        adjustedCheckout.setUTCDate(adjustedCheckout.getUTCDate() + stayLength);
+        return {
+            checkin: formatUtcDate(firstBookableDate),
+            checkout: formatUtcDate(adjustedCheckout),
+            adjusted: true,
+        };
+    }
+
+    return { checkin, checkout, adjusted: false };
+}
+
 const MARKET_DEFAULTS = {
     US: { locale: 'en-US', currency: 'USD' },
     UK: { locale: 'en-GB', currency: 'GBP' },
@@ -221,6 +260,24 @@ class ClientManager {
     }
 }
 
+function createHttpError(label, status, responseText) {
+    const preview = responseText.replaceAll(/\s+/g, ' ').slice(0, 240);
+    const error = new Error(`${label} failed with HTTP ${status}: ${preview || 'empty response'}`);
+    error.httpStatus = status;
+    error.retryable = status === 403 || status === 429 || status >= 500;
+    return error;
+}
+
+function createRetryableError(message) {
+    const error = new Error(message);
+    error.retryable = true;
+    return error;
+}
+
+function isRetryableError(error) {
+    return error?.retryable === true;
+}
+
 async function fetchJsonWithRetry(clientManager, url, request, label) {
     let lastError;
 
@@ -236,9 +293,10 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
             });
             responseText = await response.text();
         } catch (error) {
-            lastError = error;
+            lastError = createRetryableError(`${label} request failed: ${error.message}`);
             if (attempt === MAX_RETRIES) break;
-            await clientManager.rotate(`request error: ${error.message}`);
+            const rotated = await clientManager.rotate(`request error: ${error.message}`);
+            if (!rotated) break;
             log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} failed: ${error.message}`);
             await wait(attempt * 1_000 + Math.floor(Math.random() * 400));
             continue;
@@ -248,8 +306,10 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
             try {
                 return JSON.parse(responseText);
             } catch (error) {
-                lastError = new Error(`${label} returned invalid JSON: ${error.message}`);
+                lastError = createRetryableError(`${label} returned invalid JSON: ${error.message}`);
                 if (attempt === MAX_RETRIES) break;
+                const rotated = await clientManager.rotate(`${label} returned non-JSON content`);
+                if (!rotated) break;
                 log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned non-JSON content.`);
                 await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
                 continue;
@@ -257,16 +317,14 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
         }
 
         if (![403, 429].includes(response.status) && response.status < 500) {
-            const preview = responseText.replaceAll(/\s+/g, ' ').slice(0, 240);
-            throw new Error(`${label} failed with HTTP ${response.status}: ${preview || 'empty response'}`);
+            throw createHttpError(label, response.status, responseText);
         }
 
-        if (attempt === MAX_RETRIES) {
-            const preview = responseText.replaceAll(/\s+/g, ' ').slice(0, 240);
-            throw new Error(`${label} failed with HTTP ${response.status}: ${preview || 'empty response'}`);
-        }
+        lastError = createHttpError(label, response.status, responseText);
+        if (attempt === MAX_RETRIES) break;
 
-        await clientManager.rotate(`HTTP ${response.status}`);
+        const rotated = await clientManager.rotate(`HTTP ${response.status}`);
+        if (!rotated) break;
         log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned HTTP ${response.status}.`);
         await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
     }
@@ -276,7 +334,7 @@ async function fetchJsonWithRetry(clientManager, url, request, label) {
 
 function apiHeaders(context) {
     return {
-        'content-type': 'application/json',
+        'content-type': 'text/plain;charset=UTF-8',
         ...browserFetchHeaders({
             locale: context.locale,
             headers: {
@@ -395,9 +453,10 @@ async function resolveSearchContext(clientManager, input) {
     }
 
     const query = urlObject?.searchParams;
-    const checkin = normalizeDate(input.checkin || query?.get('checkin'), 'checkin');
-    const checkout = normalizeDate(input.checkout || query?.get('checkout'), 'checkout');
-    if (checkout <= checkin) throw new Error('checkout must be after checkin.');
+    const requestedCheckin = input.checkin || query?.get('checkin');
+    const requestedCheckout = input.checkout || query?.get('checkout');
+    const stayDates = normalizeStayDates(requestedCheckin, requestedCheckout);
+    const { checkin, checkout } = stayDates;
 
     const adults = normalizePositiveInteger(input.adults || query?.get('adults'), 1);
     const rooms = normalizePositiveInteger(input.rooms || query?.get('rooms'), 1);
@@ -418,6 +477,11 @@ async function resolveSearchContext(clientManager, input) {
             rooms: String(rooms),
         });
         searchUrl = `https://www.skyscanner.com/hotels/search?${searchParams}`;
+    }
+
+    searchUrl = synchronizeSearchUrl(searchUrl, { checkin, checkout, adults, rooms });
+    if (stayDates.adjusted) {
+        log.warning(`Adjusted stale stay dates to ${checkin} through ${checkout}.`);
     }
 
     return {
@@ -478,13 +542,16 @@ async function fetchSearchPageWithStatusRecovery(clientManager, context, payload
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const data = await fetchSearchPage(clientManager, context, payload, label);
         if (data.searchStatus !== 'SEARCH_STATUS_FAILED') return data;
-        if (attempt === MAX_RETRIES) {
-            throw new Error(`${label} was marked failed by Skyscanner after ${MAX_RETRIES} attempts.`);
-        }
-        log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${label} was marked failed by Skyscanner.`);
+
+        const error = createRetryableError(`${label} was marked failed by Skyscanner.`);
+        if (attempt === MAX_RETRIES) throw error;
+
+        const rotated = await clientManager.rotate(`${label} returned SEARCH_STATUS_FAILED`);
+        if (!rotated) throw error;
+        log.warning(`Request retry ${attempt}/${MAX_RETRIES}: ${error.message}`);
         await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
     }
-    throw new Error(`${label} failed after ${MAX_RETRIES} attempts.`);
+    throw createRetryableError(`${label} failed after ${MAX_RETRIES} attempts.`);
 }
 
 async function fetchInitialSearchOnce(clientManager, context, payload) {
@@ -514,11 +581,11 @@ async function fetchInitialSearchOnce(clientManager, context, payload) {
     }
 
     if (data.searchStatus === 'SEARCH_STATUS_FAILED') {
-        throw new Error('Skyscanner marked the hotel search as failed.');
+        throw createRetryableError('Skyscanner marked the hotel search as failed.');
     }
 
     if (data.searchStatus !== 'SEARCH_STATUS_COMPLETED' && data.hotels.length === 0) {
-        throw new Error(`Skyscanner hotel search did not complete after ${MAX_SEARCH_POLLS} polls.`);
+        throw createRetryableError(`Skyscanner hotel search did not complete after ${MAX_SEARCH_POLLS} polls.`);
     }
 
     return data;
@@ -529,14 +596,17 @@ async function fetchInitialSearch(clientManager, context, payload) {
         try {
             return await fetchInitialSearchOnce(clientManager, context, payload);
         } catch (error) {
-            if (attempt === MAX_INITIAL_SEARCH_ATTEMPTS) throw error;
+            if (!isRetryableError(error) || attempt === MAX_INITIAL_SEARCH_ATTEMPTS) throw error;
+
+            const rotated = await clientManager.rotate(`initial search recovery: ${error.message}`);
+            if (!rotated) throw error;
             log.warning(
-                `Initial search attempt ${attempt}/${MAX_INITIAL_SEARCH_ATTEMPTS} failed: ${error.message}. Starting a fresh search session.`,
+                `Initial search attempt ${attempt}/${MAX_INITIAL_SEARCH_ATTEMPTS} failed: ${error.message}. Retrying with a fresh session.`,
             );
             await wait(1_000 + attempt * 750);
         }
     }
-    throw new Error('Skyscanner initial hotel search failed after multiple attempts.');
+    throw createRetryableError('Skyscanner initial hotel search failed after multiple attempts.');
 }
 
 function getCanonicalHotelUrl(value) {

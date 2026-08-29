@@ -33,8 +33,8 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 | -------------------- | ------- | ----------------- | -------------------------------------------------------------------------------------- |
 | `url`                | String  | Sample search URL | Public Skyscanner hotel search URL. Takes priority over `location`.                    |
 | `location`           | String  | `New York`        | City name, numeric destination ID, or Skyscanner destination URL.                      |
-| `checkin`            | String  | `2026-08-27`      | Check-in date in `YYYY-MM-DD` format.                                                  |
-| `checkout`           | String  | `2026-08-28`      | Check-out date in `YYYY-MM-DD` format. Must be after check-in.                         |
+| `checkin`            | String  | `2026-09-01`      | Check-in date in `YYYY-MM-DD` format.                                                  |
+| `checkout`           | String  | `2026-09-02`      | Check-out date in `YYYY-MM-DD` format. Must be after check-in.                         |
 | `adults`             | Integer | `2`               | Number of adult travellers.                                                            |
 | `rooms`              | Integer | `1`               | Number of rooms.                                                                       |
 | `market`             | String  | `US`              | Two-letter market used for availability and prices.                                    |
@@ -51,7 +51,7 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 
 ```json
 {
-    "url": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-08-27&checkout=2026-08-28&adults=2&rooms=1",
+    "url": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-09-01&checkout=2026-09-02&adults=2&rooms=1",
     "results_wanted": 20,
     "max_pages": 1
 }
@@ -62,8 +62,8 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 ```json
 {
     "location": "27537542",
-    "checkin": "2026-08-27",
-    "checkout": "2026-08-28",
+    "checkin": "2026-09-01",
+    "checkout": "2026-09-02",
     "adults": 2,
     "rooms": 1,
     "sortBy": "price_low",
@@ -77,8 +77,8 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 ```json
 {
     "location": "https://www.skyscanner.com/hotels/search?entity_id=27537542",
-    "checkin": "2026-08-27",
-    "checkout": "2026-08-28",
+    "checkin": "2026-09-01",
+    "checkout": "2026-09-02",
     "sortBy": "rating",
     "results_wanted": 35,
     "max_pages": 1
@@ -121,8 +121,8 @@ The default dataset contains one item per unique hotel. Common fields include:
     "entityId": "27537542",
     "location": "New York",
     "currency": "USD",
-    "checkin": "2026-08-27",
-    "checkout": "2026-08-28",
+    "checkin": "2026-09-01",
+    "checkout": "2026-09-02",
     "sourcePage": 1,
     "scrapedAt": "2026-08-20T07:15:17.658Z"
 }

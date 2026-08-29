@@ -9,7 +9,7 @@
             "type": "string",
             "description": "A public Skyscanner hotel search URL. If both url and location are provided, url takes priority.",
             "editor": "textfield",
-            "prefill": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-08-27&checkout=2026-08-28&adults=2&rooms=1"
+            "prefill": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-09-01&checkout=2026-09-02&adults=2&rooms=1"
         },
         "location": {
             "title": "Location",
@@ -23,14 +23,14 @@
             "type": "string",
             "description": "Check-in date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
             "editor": "textfield",
-            "prefill": "2026-08-27"
+            "prefill": "2026-09-01"
         },
         "checkout": {
             "title": "Check-out",
             "type": "string",
             "description": "Check-out date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
             "editor": "textfield",
-            "prefill": "2026-08-28"
+            "prefill": "2026-09-02"
         },
         "adults": {
             "title": "Adults",

@@ -21,8 +21,8 @@ The public hotel search URL is a JavaScript application shell, so it is not used
         "market": "US",
         "locale": "en-US",
         "currency": "USD",
-        "checkinDate": "2026-08-27",
-        "checkoutDate": "2026-08-28",
+        "checkinDate": "2026-09-01",
+        "checkoutDate": "2026-09-02",
         "adults": 2,
         "childrenAges": [],
         "rooms": 1
@@ -41,7 +41,7 @@ The first response can be `SEARCH_STATUS_TRIGGERED`. In that case, the actor pol
 
 ### Headers confirmed during discovery
 
-- `content-type: application/json`
+- `content-type: text/plain;charset=UTF-8`
 - `x-user-agent: D;Web`
 - `Skyscanner-Correlation-ID`: a fresh UUID for each request
 - `traffic_source: Unknown`
@@ -63,7 +63,7 @@ Live replay tests (2026-08) reproduced the cloud failure and confirmed the worki
 
 Hotel BFF POST:
 
-- `content-type: application/json`
+- `content-type: text/plain;charset=UTF-8`
 - `accept: application/json, text/plain, */*`
 - `accept-language`: derived from the resolved locale (e.g. `en-US,en;q=0.9`)
 - `x-user-agent: D;Web`
