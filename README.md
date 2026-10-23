@@ -1,57 +1,56 @@
 ## What does Skyscanner Hotels Scraper do?
 
-Skyscanner Hotels Scraper collects hotel listings from a public Skyscanner hotel search and saves them as clean, structured dataset items. Each item represents one unique hotel, including the name, star rating, guest rating, image URLs, normalized prices, available partner offers, destination, and public hotel page.
+Skyscanner Hotels Scraper collects hotel listings from a Skyscanner hotel search and saves one clean record per hotel. Each record includes the hotel name, star rating, guest rating, image URLs, nightly and total prices, booking partner offers, map coordinates, and the public hotel page.
 
-Use it for hotel price research, destination comparisons, travel planning, accommodation directories, competitor monitoring, and scheduled market snapshots. Empty values are removed before saving, so unavailable fields are omitted instead of being stored as nulls.
+Use it for price research, destination comparisons, travel planning, accommodation directories, competitor monitoring, and scheduled market snapshots. The Actor leaves out fields that a hotel does not publish instead of saving them as nulls.
 
 ## Features
 
-- Search from one Skyscanner URL or a destination.
-- Accept a full search URL, a numeric destination ID, a Skyscanner destination URL, or a location name.
-- Keep URL input as the priority when both URL and location are supplied.
-- Set check-in, check-out, travellers, children ages, rooms, market, locale, and currency.
+- Search from a Skyscanner URL, a city name, a numeric destination ID, or a destination URL.
+- Set check-in, check-out, adults, rooms, market, locale, and currency.
 - Sort by best match, price, guest rating, stars, or distance.
-- Control the total number of listings and the maximum number of pages.
-- Return prices, taxes, discounts, image URLs, ratings, map coordinates, and partner offers when published.
-- Deduplicate listings by hotel ID.
-- Push page results as they become available for safer long runs.
-- Use Apify Proxy or custom proxy URLs for production runs.
+- Control the number of hotels saved and how many result pages are requested.
+- Receive nightly prices, taxes, discounts, image URLs, ratings, map coordinates, and partner offers when published.
+- Deduplicate hotels by hotel ID across pages.
+- Save each page as soon as it arrives, so a later request cannot erase earlier progress.
+- Switch request profiles and proxy sessions automatically when the site blocks a request.
+- Work with Apify Proxy or your own proxy URLs.
 
 ## How to use
 
 1. Open the Actor input form.
-2. Paste a public Skyscanner hotel search URL, or clear the URL and enter a location.
-3. Set dates and traveller details if they are not already present in the URL.
-4. Choose a result limit and page limit.
+2. Paste a public Skyscanner hotel search URL, or leave the URL empty and enter a location.
+3. Set dates and traveller details. If you leave the dates empty, the Actor uses tomorrow and the day after.
+4. Choose a hotel limit and a page limit.
 5. Start the run and open the default dataset when it finishes.
 
-When `url` is supplied, it is used first. When it is empty, `location` is resolved and a search is created using the supplied dates and traveller details. A numeric destination ID or a Skyscanner destination URL is the most reliable location format. Free-text locations may need proxy access if the destination service applies a challenge.
+When you supply `url`, the Actor uses it first. When the URL is empty, the Actor resolves `location` and creates a search from your dates and traveller details. A numeric destination ID is the most reliable location format. New York is `27537542`.
 
 ## Input parameters
 
-| Field                | Type    | Default           | Description                                                                            |
-| -------------------- | ------- | ----------------- | -------------------------------------------------------------------------------------- |
-| `url`                | String  | Sample search URL | Public Skyscanner hotel search URL. Takes priority over `location`.                    |
-| `location`           | String  | `New York`        | City name, numeric destination ID, or Skyscanner destination URL.                      |
-| `checkin`            | String  | `2026-09-01`      | Check-in date in `YYYY-MM-DD` format.                                                  |
-| `checkout`           | String  | `2026-09-02`      | Check-out date in `YYYY-MM-DD` format. Must be after check-in.                         |
-| `adults`             | Integer | `2`               | Number of adult travellers.                                                            |
-| `rooms`              | Integer | `1`               | Number of rooms.                                                                       |
-| `market`             | String  | `US`              | Two-letter market used for availability and prices.                                    |
-| `locale`             | String  | `en-US`           | Locale for labels and translated content.                                              |
-| `currency`           | String  | `USD`             | Three-letter price currency.                                                           |
-| `sortBy`             | String  | `best`            | `best`, `price_low`, `price_high`, `rating`, `stars_high`, `stars_low`, or `distance`. |
-| `results_wanted`     | Integer | `20`              | Maximum unique hotels saved across the run.                                            |
-| `max_pages`          | Integer | `5`               | Maximum listing pages requested. Each page contains up to 35 hotels.                   |
-| `proxyConfiguration` | Object  | Apify Proxy       | Proxy settings for reliable production runs.                                           |
+| Field                | Type    | Default     | Description                                                                                     |
+| -------------------- | ------- | ----------- | ----------------------------------------------------------------------------------------------- |
+| `url`                | String  | None        | Public Skyscanner hotel search URL. Takes priority over `location`.                             |
+| `location`           | String  | `27537542`  | City name, numeric destination ID, or Skyscanner destination URL. Used when `url` is empty.     |
+| `checkin`            | String  | Tomorrow    | Check-in date in `YYYY-MM-DD` format.                                                           |
+| `checkout`           | String  | Day after   | Check-out date in `YYYY-MM-DD` format. Must be after check-in.                                  |
+| `adults`             | Integer | `2`         | Number of adult travellers.                                                                     |
+| `rooms`              | Integer | `1`         | Number of rooms.                                                                                |
+| `market`             | String  | From URL    | Two-letter market used for availability and prices, for example `US` or `UK`. Defaults to `US`. |
+| `locale`             | String  | From market | Locale for labels and translated content. Defaults to the market locale.                        |
+| `currency`           | String  | From market | Three-letter price currency. Defaults to the market currency.                                   |
+| `sortBy`             | String  | `best`      | `best`, `price_low`, `price_high`, `rating`, `stars_high`, `stars_low`, or `distance`.          |
+| `results_wanted`     | Integer | `20`        | Maximum unique hotels saved across the run.                                                     |
+| `max_pages`          | Integer | `5`         | Maximum result pages requested. Each page contains up to 35 hotels.                             |
+| `proxyConfiguration` | Object  | Apify Proxy | Proxy settings for production runs. Residential proxies are recommended.                        |
 
 ## Usage examples
 
-### Basic search URL
+### Search URL with dates
 
 ```json
 {
-    "url": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-09-01&checkout=2026-09-02&adults=2&rooms=1",
+    "url": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-12-10&checkout=2026-12-11&adults=2&rooms=1",
     "results_wanted": 20,
     "max_pages": 1
 }
@@ -62,8 +61,8 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 ```json
 {
     "location": "27537542",
-    "checkin": "2026-09-01",
-    "checkout": "2026-09-02",
+    "checkin": "2026-12-10",
+    "checkout": "2026-12-11",
     "adults": 2,
     "rooms": 1,
     "sortBy": "price_low",
@@ -72,13 +71,11 @@ When `url` is supplied, it is used first. When it is empty, `location` is resolv
 }
 ```
 
-### Destination URL and rating sort
+### Default dates and rating sort
 
 ```json
 {
-    "location": "https://www.skyscanner.com/hotels/search?entity_id=27537542",
-    "checkin": "2026-09-01",
-    "checkout": "2026-09-02",
+    "location": "27537542",
     "sortBy": "rating",
     "results_wanted": 35,
     "max_pages": 1
@@ -97,73 +94,84 @@ The default dataset contains one item per unique hotel. Common fields include:
 | `detailsPageUrl` and `canonicalHotelUrl`               | Public hotel detail links.               |
 | `reviewScore`, `reviewScoreDescription`, `reviewCount` | Guest rating information when available. |
 | `imageUrls`                                            | Direct image URLs for the listing.       |
-| `pricePerNight` and `pricePerNightWithTaxes`           | Normalized nightly prices.               |
-| `totalPrice` and `totalPriceWithTaxes`                 | Normalized stay totals.                  |
-| `partnerOffers`                                        | Available booking partner offers.        |
+| `pricePerNight` and `pricePerNightWithTaxes`           | Nightly prices.                          |
+| `totalPrice` and `totalPriceWithTaxes`                 | Stay totals.                             |
+| `partnerOffers`                                        | Booking partner offers.                  |
 | `latitude`, `longitude`                                | Map coordinates when available.          |
 | `entityId`, `location`, `market`, `currency`           | Search context.                          |
 | `sourcePage`, `sourceUrl`, `scrapedAt`                 | Collection metadata.                     |
 
 ### Sample output
 
+This sample comes from a real run for New York with the default dates.
+
 ```json
 {
-    "hotelId": "204222293",
-    "hotelName": "DoubleTree by Hilton New York Downtown",
-    "starRating": 4,
-    "starLabel": "4 stars",
-    "detailsPageUrl": "https://www.skyscanner.com/hotels/.../ht-204222293",
-    "reviewScore": 4.2,
-    "reviewCount": 1516,
-    "imageUrls": ["https://content.skyscnr.com/..."],
-    "pricePerNight": "$188",
-    "pricePerNightWithTaxes": "$219",
+    "hotelId": "226351436",
+    "hotelName": "West Village Eurohostel",
+    "starRating": 2,
+    "starLabel": "2 stars",
+    "detailsPageUrl": "https://www.skyscanner.com/hotels/united-states/new-york-hotels/west-village-eurohostel/ht-226351436",
+    "canonicalHotelUrl": "https://www.skyscanner.com/hotels/united-states/new-york-hotels/west-village-eurohostel/ht-226351436",
+    "distanceDescription": "Manhattan, New York",
+    "latitude": 40.73818,
+    "longitude": -74.00946,
+    "reviewScore": 4,
+    "reviewScoreDescription": "Very Good",
+    "reviewCount": 56,
+    "imageUrls": ["https://content.skyscnr.com/available/2759652058/2759652058_WxH.jpg"],
+    "pricePerNight": 338,
+    "pricePerNightWithTaxes": 341.97,
+    "totalPrice": 338,
+    "totalPriceWithTaxes": 341.97,
     "entityId": "27537542",
     "location": "New York",
     "currency": "USD",
-    "checkin": "2026-09-01",
-    "checkout": "2026-09-02",
+    "checkin": "2026-10-24",
+    "checkout": "2026-10-25",
     "sourcePage": 1,
-    "scrapedAt": "2026-08-20T07:15:17.658Z"
+    "scrapedAt": "2026-10-23T11:35:35.801Z"
 }
 ```
 
-Fields that are not published for a listing are left out of that item.
-
 ## Tips for reliable runs
 
-- Start with a URL containing `entity_id`, dates, adults, and rooms.
-- Keep `max_pages` modest while testing, then increase it with `results_wanted`.
+- Keep Apify Proxy enabled with residential proxies for scheduled or higher-volume runs. Skyscanner blocks some networks after a few requests.
+- Use a numeric destination ID or a search URL with `entity_id` when you need the most predictable start.
+- Leave dates empty to use tomorrow and the day after, or set both dates explicitly.
+- Start with `max_pages` at 1 while you test, then raise it together with `results_wanted`.
 - Use `price_low` for budget comparisons and `rating` for highly rated properties.
-- Keep proxy access enabled for scheduled or higher-volume runs.
-- If free-text location lookup is challenged, use the destination URL or numeric ID instead.
-- The result limit applies to the complete run, while page limits control how far pagination can continue.
+- If a free-text city lookup is blocked, use the numeric destination ID or a destination URL instead.
 
 ## Integrations and automation
 
-Use the dataset with Google Sheets, Make, Zapier, webhooks, cloud storage, dashboards, or a custom application. Schedule recurring runs for price snapshots, destination monitoring, or hotel directory updates. The dataset can be exported as JSON, CSV, Excel, XML, or RSS.
+Use the dataset with Google Sheets, Make, Zapier, webhooks, cloud storage, dashboards, or a custom application. Schedule recurring runs for price snapshots, destination monitoring, or hotel directory updates. Export the dataset as JSON, CSV, Excel, XML, or RSS.
 
 ## Frequently asked questions
 
 ### Can I use both `url` and `location`?
 
-Yes. The URL is intentionally the primary input. Location is used only when URL is empty.
+Yes. The URL is the primary input. The Actor uses the location only when the URL is empty.
 
 ### Do I need to provide dates?
 
-Yes. Dates can come from the search URL or from `checkin` and `checkout`. Separate input fields override URL query values.
+No. If you leave both dates empty, the Actor uses tomorrow and the day after. If you provide only one date, the Actor adds one day to complete the stay.
 
 ### Why are fewer hotels returned than requested?
 
-The search may have fewer available listings, the page limit may have been reached, or duplicate hotel IDs may have been removed.
+The destination may have fewer available hotels, the page limit may have been reached, or duplicate hotel IDs may have been removed. Check the final log line for the stop reason.
 
 ### Are null values included?
 
-No. Nulls, empty strings, empty arrays, and empty objects are removed recursively before items are saved.
+No. The Actor removes nulls, empty strings, empty arrays, and empty objects before saving each item.
 
 ### Can I scrape several destinations in one run?
 
-This version accepts one search target per run. Create separate scheduled runs for separate destinations so each dataset remains easy to interpret.
+This version accepts one search target per run. Create separate scheduled runs for separate destinations so each dataset stays easy to read.
+
+### What happens when Skyscanner blocks a request?
+
+The Actor switches to another request profile and a fresh proxy session, then retries. If a result page still fails after the retry budget, the Actor restarts the search on a new session and keeps the hotels it already saved.
 
 ## Related Actors
 

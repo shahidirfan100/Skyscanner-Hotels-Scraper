@@ -1,24 +1,34 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 import { Actor, log } from 'apify';
 import { Impit } from 'impit';
 import { CookieJar } from 'tough-cookie';
 
-const API_ENDPOINT = 'https://www.skyscanner.com/g/hotel-unified-bff/v1/hotelsearch';
-const AUTOSUGGEST_ENDPOINT = 'https://www.skyscanner.com/g/autosuggest-search/api/v1/search-hotel';
+const HOTEL_SEARCH_PATH = '/g/hotel-unified-bff/v1/hotelsearch';
+const AUTOSUGGEST_PATH = '/g/autosuggest-search/api/v1/search-hotel';
 const API_PAGE_SIZE = 35;
 const MAX_RETRIES = 3;
-const MAX_INITIAL_SEARCH_ATTEMPTS = 3;
-const MAX_PROXY_ROTATIONS = 6;
+const LOCATION_MAX_ATTEMPTS = 8;
+const MAX_RESTARTS = 3;
+const MAX_ROTATIONS = 16;
 const MAX_SEARCH_POLLS = 8;
-const LOCATION_FALLBACK_BROWSER = 'ios18';
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_BACKOFF_MS = 8_000;
 const MS_PER_DAY = 24 * 60 * 60 * 1_000;
 const SKYSCANNER_HOST_PATTERN = /^(?:[a-z0-9-]+\.)*skyscanner\.[a-z.]{2,}$/i;
-const SKYSCANNER_ORIGIN = 'https://www.skyscanner.com';
-const AUTOSUGGEST_REFERER = 'https://www.skyscanner.com/hotels';
+const DEFAULT_HOSTS = ['www.skyscanner.com', 'www.skyscanner.net'];
+
+const PROFILE_LADDER = Object.freeze([
+    { browser: 'okhttp5', http3: false },
+    { browser: 'okhttp3', http3: false },
+    { browser: 'chrome142', http3: true },
+    { browser: 'ios18', http3: true },
+    { browser: 'chrome', http3: false },
+    { browser: 'firefox144', http3: false },
+    { browser: 'okhttp4', http3: false },
+    { browser: 'chrome131', http3: false },
+]);
 
 export const SORT_TYPES = Object.freeze({
     best: 'SORT_TYPE_BEST_DESC',
@@ -30,14 +40,65 @@ export const SORT_TYPES = Object.freeze({
     distance: 'SORT_TYPE_DISTANCE_ASC',
 });
 
+const MARKET_DEFAULTS = Object.freeze({
+    US: { locale: 'en-US', currency: 'USD' },
+    UK: { locale: 'en-GB', currency: 'GBP' },
+    PK: { locale: 'en-PK', currency: 'PKR' },
+    AU: { locale: 'en-AU', currency: 'AUD' },
+    CA: { locale: 'en-CA', currency: 'CAD' },
+    DE: { locale: 'de-DE', currency: 'EUR' },
+    ES: { locale: 'es-ES', currency: 'EUR' },
+    FR: { locale: 'fr-FR', currency: 'EUR' },
+    IN: { locale: 'en-IN', currency: 'INR' },
+    JP: { locale: 'ja-JP', currency: 'JPY' },
+    NL: { locale: 'nl-NL', currency: 'EUR' },
+    SG: { locale: 'en-SG', currency: 'SGD' },
+});
+
+const TLD_MARKETS = Object.freeze({
+    'co.uk': 'UK',
+    com: 'US',
+    net: 'UK',
+    pk: 'PK',
+    au: 'AU',
+    ca: 'CA',
+    de: 'DE',
+    es: 'ES',
+    fr: 'FR',
+    in: 'IN',
+    jp: 'JP',
+    nl: 'NL',
+    sg: 'SG',
+});
+
 const wait = (milliseconds) =>
     new Promise((resolve) => {
         setTimeout(resolve, milliseconds);
     });
 
+function backoffMs(attempt) {
+    return Math.min(MAX_BACKOFF_MS, 750 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
+}
+
+function retryAfterMs(response) {
+    const value = response?.headers?.get?.('retry-after');
+    if (!value) return undefined;
+
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_BACKOFF_MS);
+
+    const date = Date.parse(value);
+    if (Number.isNaN(date)) return undefined;
+    return Math.min(Math.max(date - Date.now(), 0), MAX_BACKOFF_MS);
+}
+
 export function normalizePositiveInteger(value, fallback) {
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeText(value) {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function cleanValue(value) {
@@ -62,13 +123,6 @@ function cleanValue(value) {
 
 export function cleanRecord(record) {
     return cleanValue(record) || {};
-}
-
-function browserFetchHeaders(extra) {
-    return {
-        'Skyscanner-Correlation-ID': randomUUID(),
-        ...extra.headers,
-    };
 }
 
 function getEntityIdFromUrl(value) {
@@ -103,7 +157,24 @@ function validateSkyscannerUrl(value) {
     return url;
 }
 
-export function normalizeDate(value, name) {
+function tryParseSkyscannerUrl(value) {
+    try {
+        return validateSkyscannerUrl(value);
+    } catch {
+        return undefined;
+    }
+}
+
+function inferMarket(hostname) {
+    const suffix = hostname.split('.').slice(-2).join('.');
+    return TLD_MARKETS[suffix] || TLD_MARKETS[hostname.split('.').at(-1)] || 'US';
+}
+
+function formatUtcDate(date) {
+    return date.toISOString().slice(0, 10);
+}
+
+function parseUtcDate(value, name) {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
         throw new Error(`${name} must use YYYY-MM-DD format.`);
     }
@@ -113,11 +184,43 @@ export function normalizeDate(value, name) {
         throw new Error(`${name} is not a valid calendar date.`);
     }
 
-    return value;
+    return date;
 }
 
-function formatUtcDate(date) {
-    return date.toISOString().slice(0, 10);
+export function normalizeStayDates(checkinValue, checkoutValue, now = new Date()) {
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const tomorrow = new Date(today);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+
+    let checkinDate = checkinValue ? parseUtcDate(checkinValue, 'checkin') : undefined;
+    let checkoutDate = checkoutValue ? parseUtcDate(checkoutValue, 'checkout') : undefined;
+
+    if (!checkinDate && !checkoutDate) {
+        checkinDate = new Date(tomorrow);
+        checkoutDate = new Date(tomorrow);
+        checkoutDate.setUTCDate(checkoutDate.getUTCDate() + 1);
+    } else if (!checkinDate) {
+        checkinDate = new Date(checkoutDate);
+        checkinDate.setUTCDate(checkinDate.getUTCDate() - 1);
+    } else if (!checkoutDate) {
+        checkoutDate = new Date(checkinDate);
+        checkoutDate.setUTCDate(checkoutDate.getUTCDate() + 1);
+    }
+
+    if (checkoutDate <= checkinDate) throw new Error('checkout must be after checkin.');
+
+    const stayLength = Math.round((checkoutDate - checkinDate) / MS_PER_DAY);
+    if (checkinDate < tomorrow) {
+        const adjustedCheckout = new Date(tomorrow);
+        adjustedCheckout.setUTCDate(adjustedCheckout.getUTCDate() + stayLength);
+        return {
+            checkin: formatUtcDate(tomorrow),
+            checkout: formatUtcDate(adjustedCheckout),
+            adjusted: true,
+        };
+    }
+
+    return { checkin: formatUtcDate(checkinDate), checkout: formatUtcDate(checkoutDate), adjusted: false };
 }
 
 function synchronizeSearchUrl(searchUrl, { checkin, checkout, adults, rooms }) {
@@ -129,75 +232,34 @@ function synchronizeSearchUrl(searchUrl, { checkin, checkout, adults, rooms }) {
     return url.toString();
 }
 
-export function normalizeStayDates(checkinValue, checkoutValue, now = new Date()) {
-    const checkin = normalizeDate(checkinValue, 'checkin');
-    const checkout = normalizeDate(checkoutValue, 'checkout');
-    if (checkout <= checkin) throw new Error('checkout must be after checkin.');
-
-    const checkinDate = new Date(`${checkin}T00:00:00Z`);
-    const checkoutDate = new Date(`${checkout}T00:00:00Z`);
-    const stayLength = Math.round((checkoutDate - checkinDate) / MS_PER_DAY);
-    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const firstBookableDate = new Date(today);
-    firstBookableDate.setUTCDate(firstBookableDate.getUTCDate() + 1);
-
-    if (checkinDate < firstBookableDate) {
-        const adjustedCheckout = new Date(firstBookableDate);
-        adjustedCheckout.setUTCDate(adjustedCheckout.getUTCDate() + stayLength);
-        return {
-            checkin: formatUtcDate(firstBookableDate),
-            checkout: formatUtcDate(adjustedCheckout),
-            adjusted: true,
-        };
-    }
-
-    return { checkin, checkout, adjusted: false };
+function createHttpError(label, status, responseText) {
+    const preview = String(responseText || '')
+        .replaceAll(/\s+/g, ' ')
+        .slice(0, 200);
+    const error = new Error(`${label} failed with HTTP ${status}: ${preview || 'empty response'}`);
+    error.httpStatus = status;
+    return error;
 }
 
-const MARKET_DEFAULTS = {
-    US: { locale: 'en-US', currency: 'USD' },
-    UK: { locale: 'en-GB', currency: 'GBP' },
-    PK: { locale: 'en-PK', currency: 'PKR' },
-    AU: { locale: 'en-AU', currency: 'AUD' },
-    CA: { locale: 'en-CA', currency: 'CAD' },
-    DE: { locale: 'de-DE', currency: 'EUR' },
-    ES: { locale: 'es-ES', currency: 'EUR' },
-    FR: { locale: 'fr-FR', currency: 'EUR' },
-    IN: { locale: 'en-IN', currency: 'INR' },
-    JP: { locale: 'ja-JP', currency: 'JPY' },
-    NL: { locale: 'nl-NL', currency: 'EUR' },
-    SG: { locale: 'en-SG', currency: 'SGD' },
-};
-
-function inferMarket(hostname) {
-    const tldMarket = {
-        'co.uk': 'UK',
-        com: 'US',
-        pk: 'PK',
-        au: 'AU',
-        ca: 'CA',
-        de: 'DE',
-        es: 'ES',
-        fr: 'FR',
-        in: 'IN',
-        jp: 'JP',
-        nl: 'NL',
-        sg: 'SG',
-    };
-
-    const suffix = hostname.split('.').slice(-2).join('.');
-    return tldMarket[suffix] || tldMarket[hostname.split('.').at(-1)] || 'US';
+function createRetryableError(message) {
+    const error = new Error(message);
+    error.retryable = true;
+    return error;
 }
 
-async function loadInput() {
-    const runtimeInput = await Actor.getInput();
-    if (runtimeInput && Object.keys(runtimeInput).length > 0) return runtimeInput;
+function isRetryableError(error) {
+    return error?.retryable === true;
+}
 
-    try {
-        return JSON.parse(await readFile(new URL('../INPUT.json', import.meta.url), 'utf8'));
-    } catch (error) {
-        throw new Error(`No runtime input was supplied and INPUT.json could not be loaded: ${error.message}`);
-    }
+function isRetryableStatus(status) {
+    return status === 403 || status === 404 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function isBlockPayload(json) {
+    if (!json || typeof json !== 'object') return false;
+    if (String(json.reason || '').toLowerCase() === 'blocked') return true;
+    const redirect = String(json.redirect_to || json.redirectTo || '');
+    return /\/sttc\/px\/|captcha|perimeterx/i.test(redirect);
 }
 
 async function createProxyConfiguration(proxyConfiguration) {
@@ -214,132 +276,164 @@ async function createProxyConfiguration(proxyConfiguration) {
     return Actor.createProxyConfiguration({ ...proxyConfiguration });
 }
 
-async function createClient(proxy, sessionIndex, browser = 'chrome') {
-    const sessionSuffix = `${sessionIndex}${randomUUID().replaceAll('-', '').slice(0, 10)}`;
-    const proxyUrl = proxy ? await proxy.newUrl(`skyscanner${sessionSuffix}`) : undefined;
-
+function createClient({ browser, http3 }, proxyUrl) {
     return new Impit({
         browser,
-        ignoreTlsErrors: true,
         timeout: REQUEST_TIMEOUT_MS,
         cookieJar: new CookieJar(),
-        ...(proxyUrl && { proxyUrl }),
+        ...(http3 ? { http3: true } : {}),
+        ...(proxyUrl ? { proxyUrl } : {}),
     });
 }
 
-class ClientManager {
-    constructor(proxyConfiguration) {
+class SessionManager {
+    constructor({ proxyConfiguration, hosts }) {
         this.proxyConfiguration = proxyConfiguration;
-        this.proxy = null;
+        this.hosts = hosts;
+        this.proxy = undefined;
+        this.comboIndex = 0;
+        this.hostIndex = 0;
         this.rotations = 0;
-        this.maxRotations = MAX_PROXY_ROTATIONS;
-        this.client = null;
-        this.browser = 'chrome';
+        this.session = undefined;
     }
 
     async init() {
         this.proxy = await createProxyConfiguration(this.proxyConfiguration);
-        this.client = await createClient(this.proxy, 0, this.browser);
+        await this.openSession();
     }
 
-    async rotate(reason, browser = this.browser) {
-        if (this.rotations >= this.maxRotations) return false;
-        this.rotations++;
-        this.browser = browser;
-        const context = this.proxy ? `proxy session ${this.rotations}/${this.maxRotations}` : 'fresh client';
-        log.debug(`Rotating to ${context} after ${reason}.`);
-        this.client = await createClient(this.proxy, this.rotations, this.browser);
-        return true;
+    get current() {
+        return this.session;
+    }
+
+    get host() {
+        return this.session.host;
+    }
+
+    async openSession() {
+        const combo = PROFILE_LADDER[this.comboIndex % PROFILE_LADDER.length];
+        const host = this.hosts[this.hostIndex % this.hosts.length];
+        const sessionId = `skyscanner${randomUUID().replaceAll('-', '').slice(0, 14)}`;
+        const proxyUrl = this.proxy ? await this.proxy.newUrl(sessionId) : undefined;
+        const client = createClient(combo, proxyUrl);
+
+        this.session = { ...combo, host, client };
+        log.debug(
+            `Session opened: ${combo.browser}${combo.http3 ? ' with HTTP/3' : ''} on ${host}${proxyUrl ? ' through a fresh proxy session' : ''}.`,
+        );
+    }
+
+    async rotate(reason) {
+        if (this.rotations >= MAX_ROTATIONS) return false;
+
+        for (let step = 0; step < PROFILE_LADDER.length * this.hosts.length && this.rotations < MAX_ROTATIONS; step++) {
+            this.rotations++;
+            this.hostIndex++;
+            if (this.hostIndex >= this.hosts.length) {
+                this.hostIndex = 0;
+                this.comboIndex++;
+            }
+
+            try {
+                await this.openSession();
+                log.debug(
+                    `Switched request session after ${reason}. Now using ${this.session.browser} on ${this.session.host}.`,
+                );
+                return true;
+            } catch (error) {
+                log.debug(
+                    `Session profile ${PROFILE_LADDER[this.comboIndex % PROFILE_LADDER.length].browser} is unavailable: ${error.message}`,
+                );
+            }
+        }
+
+        return false;
     }
 }
 
-function createHttpError(label, status, responseText) {
-    const preview = responseText.replaceAll(/\s+/g, ' ').slice(0, 240);
-    const error = new Error(`${label} failed with HTTP ${status}: ${preview || 'empty response'}`);
-    error.httpStatus = status;
-    error.retryable = status === 403 || status === 429 || status >= 500;
-    return error;
-}
-
-function createRetryableError(message) {
-    const error = new Error(message);
-    error.retryable = true;
-    return error;
-}
-
-function isRetryableError(error) {
-    return error?.retryable === true;
-}
-
-async function fetchJsonWithRetry(clientManager, url, request, label, options = {}) {
+async function requestJson(sessionManager, { path, method = 'GET', headers, body, label, maxAttempts = MAX_RETRIES }) {
     let lastError;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const session = sessionManager.current;
+        const url = `https://${session.host}${path}`;
         let response;
         let responseText;
+
         try {
-            response = await clientManager.client.fetch(url, {
-                method: request.method || 'GET',
+            response = await session.client.fetch(url, {
+                method,
                 timeout: REQUEST_TIMEOUT_MS,
-                headers: request.headers,
-                body: request.body,
+                headers: headers(session.host),
+                body,
+                ...(session.http3 ? { forceHttp3: true } : {}),
             });
             responseText = await response.text();
         } catch (error) {
             lastError = createRetryableError(`${label} request failed: ${error.message}`);
-            if (attempt === MAX_RETRIES) break;
-            const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
-            const rotated = await clientManager.rotate(`request error: ${error.message}`, fallbackBrowser);
-            if (!rotated) break;
-            log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} failed: ${error.message}`);
-            await wait(attempt * 1_000 + Math.floor(Math.random() * 400));
+            if (attempt === maxAttempts) break;
+            log.debug(`Retry ${attempt}/${maxAttempts} for ${label}: ${error.message}.`);
+            if (!(await sessionManager.rotate('a transport error'))) break;
+            await wait(backoffMs(attempt));
             continue;
         }
 
-        if (response.ok) {
-            try {
-                return JSON.parse(responseText);
-            } catch (error) {
-                lastError = createRetryableError(`${label} returned invalid JSON: ${error.message}`);
-                if (attempt === MAX_RETRIES) break;
-                const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
-                const rotated = await clientManager.rotate(`${label} returned non-JSON content`, fallbackBrowser);
-                if (!rotated) break;
-                log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned non-JSON content.`);
-                await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
-                continue;
-            }
+        let json;
+        try {
+            json = responseText ? JSON.parse(responseText) : undefined;
+        } catch {
+            json = undefined;
         }
 
-        if (![403, 429].includes(response.status) && response.status < 500) {
+        if (response.ok && json !== undefined && !isBlockPayload(json)) {
+            return json;
+        }
+
+        if (response.ok && isBlockPayload(json)) {
+            lastError = createRetryableError(`${label} was blocked by the site's bot protection.`);
+        } else if (response.ok) {
+            lastError = createRetryableError(`${label} returned a response that was not JSON.`);
+        } else if (isRetryableStatus(response.status)) {
+            lastError = createRetryableError(createHttpError(label, response.status, responseText).message);
+        } else {
             throw createHttpError(label, response.status, responseText);
         }
 
-        lastError = createHttpError(label, response.status, responseText);
-        if (attempt === MAX_RETRIES) break;
+        if (attempt === maxAttempts) break;
 
-        const fallbackBrowser = options.browserFallbacks?.[attempt - 1];
-        const rotated = await clientManager.rotate(`HTTP ${response.status}`, fallbackBrowser);
-        if (!rotated) break;
-        log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${label} returned HTTP ${response.status}.`);
-        await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
+        let failureReason = `HTTP ${response.status}`;
+        if (response.ok) {
+            failureReason = isBlockPayload(json) ? 'bot protection block' : 'non-JSON response';
+        }
+        log.debug(`Retry ${attempt}/${maxAttempts} for ${label}: ${failureReason}.`);
+
+        if (!(await sessionManager.rotate(failureReason))) break;
+
+        const delay = retryAfterMs(response) ?? backoffMs(attempt);
+        await wait(delay);
     }
 
-    throw lastError || new Error(`${label} failed after ${MAX_RETRIES} attempts.`);
+    throw lastError || createRetryableError(`${label} failed after ${maxAttempts} attempts.`);
 }
 
-function apiHeaders(context) {
+function searchHeaders(host, entityId) {
     return {
         'content-type': 'text/plain;charset=UTF-8',
-        ...browserFetchHeaders({
-            headers: {
-                'x-user-agent': 'D;Web',
-                traffic_source: 'Unknown',
-                app_name: 'web',
-                origin: SKYSCANNER_ORIGIN,
-                referer: context.searchUrl,
-            },
-        }),
+        'x-user-agent': 'D;Web',
+        traffic_source: 'Unknown',
+        app_name: 'web',
+        origin: `https://${host}`,
+        referer: `https://${host}/hotels/search?entity_id=${entityId}`,
+        'Skyscanner-Correlation-ID': randomUUID(),
+    };
+}
+
+function autosuggestHeaders(host) {
+    return {
+        referer: `https://${host}/hotels`,
+        'x-user-agent': 'D;Web',
+        app_name: 'web',
+        'Skyscanner-Correlation-ID': randomUUID(),
     };
 }
 
@@ -381,7 +475,7 @@ function findAutosuggestEntity(data) {
     return ranked[0];
 }
 
-async function resolveLocation(clientManager, location, market, locale) {
+async function resolveLocation(sessionManager, location, market, locale) {
     const value = String(location).trim();
     if (!value) throw new Error('Location cannot be empty.');
 
@@ -390,23 +484,17 @@ async function resolveLocation(clientManager, location, market, locale) {
     const urlEntityId = getEntityIdFromUrl(value);
     if (urlEntityId) return { entityId: urlEntityId, locationName: undefined };
 
-    const encodedLocation = encodeURIComponent(value);
-    const autosuggestUrl = `${AUTOSUGGEST_ENDPOINT}/${market}/${locale}/${encodedLocation}?rf=map&vrows=10`;
-    const data = await fetchJsonWithRetry(
-        clientManager,
-        autosuggestUrl,
-        {
-            headers: browserFetchHeaders({
-                headers: {
-                    referer: AUTOSUGGEST_REFERER,
-                    'x-user-agent': 'D;Web',
-                    app_name: 'web',
-                },
-            }),
-        },
-        `Location lookup for "${value}"`,
-        { browserFallbacks: [LOCATION_FALLBACK_BROWSER, LOCATION_FALLBACK_BROWSER] },
-    );
+    if (tryParseSkyscannerUrl(value)) {
+        throw new Error('The supplied Skyscanner URL must contain entity_id, ci-, or ai- destination information.');
+    }
+
+    const path = `${AUTOSUGGEST_PATH}/${market}/${locale}/${encodeURIComponent(value)}?rf=map&vrows=10`;
+    const data = await requestJson(sessionManager, {
+        path,
+        headers: autosuggestHeaders,
+        label: `Location lookup for "${value}"`,
+        maxAttempts: LOCATION_MAX_ATTEMPTS,
+    });
 
     const place = findAutosuggestEntity(data);
     if (!place?.entityId) {
@@ -416,10 +504,18 @@ async function resolveLocation(clientManager, location, market, locale) {
     return { entityId: place.entityId, locationName: place.name };
 }
 
-async function resolveSearchContext(clientManager, input) {
-    const suppliedUrl = typeof input.url === 'string' && input.url.trim() ? input.url.trim() : undefined;
-    const suppliedLocation =
-        typeof input.location === 'string' && input.location.trim() ? input.location.trim() : undefined;
+function selectHosts(inputHost) {
+    const hosts = [];
+    if (inputHost && SKYSCANNER_HOST_PATTERN.test(inputHost)) hosts.push(inputHost);
+    for (const host of DEFAULT_HOSTS) {
+        if (!hosts.includes(host)) hosts.push(host);
+    }
+    return hosts;
+}
+
+async function resolveSearchContext(sessionManager, input) {
+    const suppliedUrl = normalizeText(input.url);
+    const suppliedLocation = normalizeText(input.location);
 
     let searchUrl;
     let entityId;
@@ -434,34 +530,41 @@ async function resolveSearchContext(clientManager, input) {
         }
         searchUrl = suppliedUrl;
     } else if (suppliedLocation) {
+        const locationUrl = tryParseSkyscannerUrl(suppliedLocation);
+        const marketHint = normalizeText(input.market) || (locationUrl ? inferMarket(locationUrl.hostname) : 'US');
+        const marketDefaults = MARKET_DEFAULTS[marketHint] || MARKET_DEFAULTS.US;
         const resolved = await resolveLocation(
-            clientManager,
+            sessionManager,
             suppliedLocation,
-            input.market || 'US',
-            input.locale || 'en-US',
+            marketHint,
+            normalizeText(input.locale) || marketDefaults.locale,
         );
         entityId = resolved.entityId;
         locationName = resolved.locationName;
-        if (getEntityIdFromUrl(suppliedLocation)) searchUrl = suppliedLocation;
+        if (locationUrl) {
+            searchUrl = suppliedLocation;
+            urlObject = locationUrl;
+        }
     } else {
-        throw new Error('Provide either url or location.');
+        throw new Error('Provide a Skyscanner search URL or a location.');
     }
 
     const query = urlObject?.searchParams;
-    const requestedCheckin = input.checkin || query?.get('checkin');
-    const requestedCheckout = input.checkout || query?.get('checkout');
-    const stayDates = normalizeStayDates(requestedCheckin, requestedCheckout);
+    const stayDates = normalizeStayDates(
+        input.checkin || query?.get('checkin'),
+        input.checkout || query?.get('checkout'),
+    );
     const { checkin, checkout } = stayDates;
 
-    const adults = normalizePositiveInteger(input.adults || query?.get('adults'), 1);
-    const rooms = normalizePositiveInteger(input.rooms || query?.get('rooms'), 1);
-    const childrenAges = Array.isArray(input.childrenAges)
-        ? input.childrenAges.filter((age) => Number.isSafeInteger(Number(age)) && Number(age) >= 0).map(Number)
-        : [];
-    const market = input.market || query?.get('market') || (urlObject ? inferMarket(urlObject.hostname) : 'US');
+    const adults = Math.min(normalizePositiveInteger(input.adults || query?.get('adults'), 2), 16);
+    const rooms = Math.min(normalizePositiveInteger(input.rooms || query?.get('rooms'), 1), 8);
+    const childrenAges = [];
+
+    const market =
+        normalizeText(input.market) || query?.get('market') || (urlObject ? inferMarket(urlObject.hostname) : 'US');
     const marketDefaults = MARKET_DEFAULTS[market] || MARKET_DEFAULTS.US;
-    const locale = input.locale || query?.get('locale') || marketDefaults.locale;
-    const currency = input.currency || query?.get('currency') || marketDefaults.currency;
+    const locale = normalizeText(input.locale) || query?.get('locale') || marketDefaults.locale;
+    const currency = normalizeText(input.currency) || query?.get('currency') || marketDefaults.currency;
 
     if (!searchUrl) {
         const searchParams = new URLSearchParams({
@@ -470,13 +573,16 @@ async function resolveSearchContext(clientManager, input) {
             checkout,
             adults: String(adults),
             rooms: String(rooms),
+            market,
+            locale,
+            currency,
         });
         searchUrl = `https://www.skyscanner.com/hotels/search?${searchParams}`;
     }
 
     searchUrl = synchronizeSearchUrl(searchUrl, { checkin, checkout, adults, rooms });
     if (stayDates.adjusted) {
-        log.warning(`Adjusted stale stay dates to ${checkin} through ${checkout}.`);
+        log.warning(`Adjusted the stay dates to ${checkin} through ${checkout} so they are bookable.`);
     }
 
     return {
@@ -520,37 +626,18 @@ function buildSearchPayload(context, offset, sortType, sessionToken) {
     });
 }
 
-async function fetchSearchPage(clientManager, context, payload, label) {
-    return fetchJsonWithRetry(
-        clientManager,
-        API_ENDPOINT,
-        {
-            method: 'POST',
-            headers: apiHeaders(context),
-            body: JSON.stringify(payload),
-        },
+async function fetchSearchPage(sessionManager, context, payload, label) {
+    return requestJson(sessionManager, {
+        path: HOTEL_SEARCH_PATH,
+        method: 'POST',
+        headers: (host) => searchHeaders(host, context.entityId),
+        body: JSON.stringify(payload),
         label,
-    );
+    });
 }
 
-async function fetchSearchPageWithStatusRecovery(clientManager, context, payload, label) {
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        const data = await fetchSearchPage(clientManager, context, payload, label);
-        if (data.searchStatus !== 'SEARCH_STATUS_FAILED') return data;
-
-        const error = createRetryableError(`${label} was marked failed by Skyscanner.`);
-        if (attempt === MAX_RETRIES) throw error;
-
-        const rotated = await clientManager.rotate(`${label} returned SEARCH_STATUS_FAILED`);
-        if (!rotated) throw error;
-        log.debug(`Request retry ${attempt}/${MAX_RETRIES}: ${error.message}`);
-        await wait(attempt * 1_500 + Math.floor(Math.random() * 500));
-    }
-    throw createRetryableError(`${label} failed after ${MAX_RETRIES} attempts.`);
-}
-
-async function fetchInitialSearchOnce(clientManager, context, payload) {
-    let data = await fetchSearchPage(clientManager, context, payload, 'Hotel search');
+async function fetchSearchPageWithPolling(sessionManager, context, payload, label) {
+    let data = await fetchSearchPage(sessionManager, context, payload, label);
     let poll = 0;
 
     while (
@@ -563,16 +650,18 @@ async function fetchInitialSearchOnce(clientManager, context, payload) {
         poll++;
         await wait(750 + poll * 250);
         data = await fetchSearchPage(
-            clientManager,
+            sessionManager,
             context,
             { ...payload, sessionToken: data.sessionToken },
-            `Hotel search poll ${poll}`,
+            `${label} poll ${poll}`,
         );
     }
 
     if (!Array.isArray(data?.hotels)) {
         const keys = data && typeof data === 'object' ? Object.keys(data).join(', ') : 'none';
-        throw new Error(`Skyscanner listing response is missing the hotels array. Response keys: ${keys}`);
+        throw createRetryableError(
+            `The hotel search response is missing its hotels array. Response keys: ${keys}. Check API_DISCOVERY.md for the current response shape.`,
+        );
     }
 
     if (data.searchStatus === 'SEARCH_STATUS_FAILED') {
@@ -580,28 +669,10 @@ async function fetchInitialSearchOnce(clientManager, context, payload) {
     }
 
     if (data.searchStatus !== 'SEARCH_STATUS_COMPLETED' && data.hotels.length === 0) {
-        throw createRetryableError(`Skyscanner hotel search did not complete after ${MAX_SEARCH_POLLS} polls.`);
+        throw createRetryableError(`The hotel search did not complete after ${MAX_SEARCH_POLLS} polls.`);
     }
 
     return data;
-}
-
-async function fetchInitialSearch(clientManager, context, payload) {
-    for (let attempt = 1; attempt <= MAX_INITIAL_SEARCH_ATTEMPTS; attempt++) {
-        try {
-            return await fetchInitialSearchOnce(clientManager, context, payload);
-        } catch (error) {
-            if (!isRetryableError(error) || attempt === MAX_INITIAL_SEARCH_ATTEMPTS) throw error;
-
-            const rotated = await clientManager.rotate(`initial search recovery: ${error.message}`);
-            if (!rotated) throw error;
-            log.debug(
-                `Initial search attempt ${attempt}/${MAX_INITIAL_SEARCH_ATTEMPTS} failed: ${error.message}. Retrying with a fresh session.`,
-            );
-            await wait(1_000 + attempt * 750);
-        }
-    }
-    throw createRetryableError('Skyscanner initial hotel search failed after multiple attempts.');
 }
 
 function getCanonicalHotelUrl(value) {
@@ -705,20 +776,21 @@ export function mapHotel(hotel, context, searchData, page) {
     });
 }
 
+function getInputHost(input) {
+    const suppliedUrl = normalizeText(input.url);
+    if (!suppliedUrl) return undefined;
+
+    try {
+        return new URL(suppliedUrl).hostname;
+    } catch {
+        return undefined;
+    }
+}
+
 async function run() {
-    const input = await loadInput();
+    const input = (await Actor.getInput()) || {};
     const {
-        url,
-        location,
         sortBy = 'best',
-        checkin,
-        checkout,
-        adults,
-        childrenAges,
-        rooms,
-        market,
-        locale,
-        currency,
         results_wanted: resultsWantedRaw = 20,
         max_pages: maxPagesRaw = 5,
         proxyConfiguration,
@@ -729,78 +801,102 @@ async function run() {
     const sortType = SORT_TYPES[sortBy];
     if (!sortType) throw new Error(`Unsupported sortBy value: ${sortBy}`);
 
-    const clientManager = new ClientManager(proxyConfiguration);
-    await clientManager.init();
-    const context = await resolveSearchContext(clientManager, {
-        url,
-        location,
-        checkin,
-        checkout,
-        adults,
-        childrenAges,
-        rooms,
-        market,
-        locale,
-        currency,
+    const inputHost = getInputHost(input);
+    const sessionManager = new SessionManager({
+        proxyConfiguration,
+        hosts: selectHosts(inputHost),
     });
+    await sessionManager.init();
+
+    const context = await resolveSearchContext(sessionManager, input);
 
     log.info(
-        `Start run | target=${resultsWanted} | max_pages=${maxPages} | entity=${context.entityId} | sort=${sortBy}`,
+        `Start run | target=${resultsWanted} | max_pages=${maxPages} | entity=${context.entityId} | sort=${sortBy} | host=${sessionManager.host}`,
     );
 
     const seen = new Set();
+    const completedPages = new Set();
     let saved = 0;
-    let pagesProcessed = 0;
-    let stopReason = 'max_pages';
+    let restarts = 0;
+    let nextPage = 0;
+    let offset = 0;
     let sessionToken;
+    let stopReason = 'max_pages';
 
-    for (let page = 0; page < maxPages && saved < resultsWanted; page++) {
-        const offset = page * API_PAGE_SIZE;
+    while (saved < resultsWanted && nextPage < maxPages) {
         const payload = buildSearchPayload(context, offset, sortType, sessionToken);
-        const data =
-            page === 0
-                ? await fetchInitialSearch(clientManager, context, payload)
-                : await fetchSearchPageWithStatusRecovery(
-                      clientManager,
-                      context,
-                      payload,
-                      `Hotel search page ${page + 1}`,
-                  );
-        pagesProcessed++;
-        sessionToken = data.sessionToken || sessionToken;
 
-        if (data.hotels.length === 0) {
-            stopReason = 'no_more_hotels';
-            break;
+        try {
+            const data = await fetchSearchPageWithPolling(
+                sessionManager,
+                context,
+                payload,
+                `Hotel search page ${nextPage + 1}`,
+            );
+
+            sessionToken = data.sessionToken || sessionToken;
+            completedPages.add(nextPage);
+
+            if (data.hotels.length === 0) {
+                stopReason = 'no_more_hotels';
+                break;
+            }
+
+            const batch = [];
+            for (const hotel of data.hotels) {
+                if (saved + batch.length >= resultsWanted) break;
+                if (!hotel || typeof hotel !== 'object') continue;
+                const hotelId = String(hotel.id || '');
+                if (!hotelId || seen.has(hotelId)) continue;
+                seen.add(hotelId);
+                try {
+                    batch.push(mapHotel(hotel, context, data, nextPage + 1));
+                } catch (error) {
+                    log.debug(`Skipped hotel ${hotelId} because it could not be mapped: ${error.message}`);
+                }
+            }
+
+            if (batch.length > 0) {
+                await Actor.pushData(batch);
+                saved += batch.length;
+                log.info(`Saved ${batch.length} hotels. Total: ${saved}/${resultsWanted}.`);
+            }
+
+            if (saved >= resultsWanted) {
+                stopReason = 'result_limit';
+                break;
+            }
+
+            const totalHotels = Number(data.searchSummary?.hotelTotal);
+            if (Number.isSafeInteger(totalHotels) && totalHotels > 0 && offset + data.hotels.length >= totalHotels) {
+                stopReason = 'last_page';
+                break;
+            }
+
+            offset += data.hotels.length;
+            nextPage++;
+        } catch (error) {
+            if (!isRetryableError(error) || restarts >= MAX_RESTARTS) throw error;
+
+            restarts++;
+            log.debug(
+                `Page ${nextPage + 1} could not be completed (${error.message}). Restarting the search (${restarts}/${MAX_RESTARTS}).`,
+            );
+
+            await wait(1_500 + restarts * 1_000);
+            if (!(await sessionManager.rotate('a failed search page'))) throw error;
+
+            nextPage = 0;
+            offset = 0;
+            sessionToken = undefined;
         }
-
-        const batch = [];
-        for (const hotel of data.hotels) {
-            if (saved + batch.length >= resultsWanted) break;
-            const hotelId = String(hotel.id || '');
-            if (!hotelId || seen.has(hotelId)) continue;
-            seen.add(hotelId);
-            batch.push(mapHotel(hotel, context, data, page + 1));
-        }
-
-        if (batch.length > 0) {
-            await Actor.pushData(batch);
-            saved += batch.length;
-            log.info(`Saved ${batch.length} hotels. Total: ${saved}/${resultsWanted}.`);
-        }
-
-        const totalHotels = Number(data.searchSummary?.hotelTotal);
-        if (Number.isSafeInteger(totalHotels) && totalHotels > 0 && offset + data.hotels.length >= totalHotels) {
-            stopReason = 'last_page';
-            break;
-        }
-
-        if (page + 1 >= maxPages) stopReason = 'max_pages';
     }
 
     if (saved >= resultsWanted) stopReason = 'result_limit';
-    if (saved === 0) log.warning('The run completed successfully, but no hotels matched the supplied search.');
-    log.info(`Done | saved=${saved} | pages=${pagesProcessed} | stop_reason=${stopReason}`);
+    if (saved === 0) {
+        log.warning('The run finished, but no hotels matched the supplied search. Check the destination and dates.');
+    }
+    log.info(`Done | saved=${saved} | pages=${completedPages.size} | restarts=${restarts} | stop_reason=${stopReason}`);
 }
 
 const isMain = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
@@ -812,7 +908,10 @@ if (isMain) {
         await run();
         await Actor.exit();
     } catch (error) {
-        log.exception(error, 'Run failed.');
+        log.exception(
+            error,
+            'Run failed. Read API_DISCOVERY.md, then inspect the failing request before changing the actor.',
+        );
         throw error;
     }
 }

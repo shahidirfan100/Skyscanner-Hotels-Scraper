@@ -1,36 +1,34 @@
 {
     "title": "Skyscanner Hotels Scraper",
-    "description": "Collect hotel listing data from a Skyscanner search URL or destination.",
+    "description": "Collect hotel listings, prices, ratings, and booking offers from a Skyscanner hotel search.",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
         "url": {
             "title": "Skyscanner search URL",
             "type": "string",
-            "description": "A public Skyscanner hotel search URL. If both url and location are provided, url takes priority.",
-            "editor": "textfield",
-            "prefill": "https://www.skyscanner.com/hotels/search?entity_id=27537542&checkin=2026-09-01&checkout=2026-09-02&adults=2&rooms=1"
+            "description": "A public Skyscanner hotel search URL. When supplied, it takes priority over the location field.",
+            "editor": "textfield"
         },
         "location": {
             "title": "Location",
             "type": "string",
-            "description": "A city or destination name, a numeric Skyscanner entity ID, or a Skyscanner destination URL. Used when url is empty.",
+            "description": "A city name, a numeric Skyscanner destination ID, or a Skyscanner destination URL. New York is 27537542. Used when the search URL is empty.",
             "editor": "textfield",
-            "prefill": "New York"
+            "prefill": "27537542",
+            "default": "27537542"
         },
         "checkin": {
             "title": "Check-in",
             "type": "string",
-            "description": "Check-in date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
-            "editor": "textfield",
-            "prefill": "2026-09-01"
+            "description": "Check-in date in YYYY-MM-DD format. Defaults to tomorrow when omitted.",
+            "editor": "textfield"
         },
         "checkout": {
             "title": "Check-out",
             "type": "string",
-            "description": "Check-out date in YYYY-MM-DD format. A value here overrides the date in the search URL.",
-            "editor": "textfield",
-            "prefill": "2026-09-02"
+            "description": "Check-out date in YYYY-MM-DD format. Defaults to the day after check-in when omitted.",
+            "editor": "textfield"
         },
         "adults": {
             "title": "Adults",
@@ -38,8 +36,7 @@
             "description": "Number of adult travellers.",
             "editor": "number",
             "minimum": 1,
-            "maximum": 16,
-            "prefill": 2
+            "maximum": 16
         },
         "rooms": {
             "title": "Rooms",
@@ -47,29 +44,25 @@
             "description": "Number of rooms required.",
             "editor": "number",
             "minimum": 1,
-            "maximum": 8,
-            "prefill": 1
+            "maximum": 8
         },
         "market": {
             "title": "Market",
             "type": "string",
-            "description": "Two-letter market code used for pricing and availability, for example US or UK.",
-            "editor": "textfield",
-            "prefill": "US"
+            "description": "Two-letter market code used for pricing and availability, for example US or UK. Defaults to the URL host or US.",
+            "editor": "textfield"
         },
         "locale": {
             "title": "Locale",
             "type": "string",
-            "description": "Locale used for labels and translated listing content.",
-            "editor": "textfield",
-            "prefill": "en-US"
+            "description": "Locale used for labels and translated listing content. Defaults to the market locale.",
+            "editor": "textfield"
         },
         "currency": {
             "title": "Currency",
             "type": "string",
-            "description": "Three-letter currency code used for prices.",
-            "editor": "textfield",
-            "prefill": "USD"
+            "description": "Three-letter currency code used for prices. Defaults to the market currency.",
+            "editor": "textfield"
         },
         "sortBy": {
             "title": "Sort listings",
@@ -86,7 +79,7 @@
                 "Stars: low to high",
                 "Distance"
             ],
-            "prefill": "best"
+            "default": "best"
         },
         "results_wanted": {
             "title": "Maximum hotels",
@@ -94,7 +87,7 @@
             "description": "Maximum number of unique hotel listings saved across the run.",
             "editor": "number",
             "minimum": 1,
-            "prefill": 20
+            "default": 20
         },
         "max_pages": {
             "title": "Maximum pages",
@@ -102,12 +95,12 @@
             "description": "Maximum listing pages requested. Each page contains up to 35 hotels.",
             "editor": "number",
             "minimum": 1,
-            "prefill": 5
+            "default": 5
         },
         "proxyConfiguration": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Use Apify Proxy or your own proxy URLs for reliable production runs.",
+            "description": "Use Apify Proxy or your own proxy URLs for reliable production runs. Residential proxies are recommended.",
             "editor": "proxy",
             "default": {
                 "useApifyProxy": true,
